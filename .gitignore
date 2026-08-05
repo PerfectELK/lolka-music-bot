@@ -1,0 +1,35 @@
+# Секреты
+token.txt
+token*.txt
+.env
+
+# База данных
+playlists.db
+playlists.db-journal
+playlists.db-wal
+playlists.db-shm
+*.db
+
+# Блокировка единственного инстанса
+bot.lock
+
+# Кеш скачанных треков
+cache/
+
+# Локальные аудио-вложения
+uploads/
+
+# Логи
+logs/
+
+# Окружение и кеши
+.venv/
+__pycache__/
+*.py[cod]
+
+# IDE
+.idea/
+.vscode/
+
+# Инструменты Kilo (планы, сессии, конфиги агента)
+.kilo/
