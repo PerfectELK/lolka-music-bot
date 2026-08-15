@@ -283,19 +283,15 @@ class BotPanelView(ui.View):
         if self.selected is None:
             await self._reply_ephemeral(interaction, _PICK_FIRST)
             return
-        try:
-            await interaction.response.defer()
-        except Exception:
-            pass
         tracks = await asyncio.to_thread(
             self.engine.db.get_playlist, self.guild_id, self.selected
         ) or []
         pager = TrackListPagerView(self.engine, self.guild_id, self.selected, tracks)
         try:
-            msg = await interaction.followup.send(
+            await interaction.response.send_message(
                 content=pager._render(), view=pager, ephemeral=True
             )
-            pager.message = msg
+            pager.message = await interaction.original_response()
         except Exception:
             pass
 

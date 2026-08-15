@@ -448,10 +448,10 @@ async def open_perms_panel(engine, ctx, guild_id: int) -> None:
     interaction = getattr(ctx, "interaction", None)
     try:
         if interaction is not None:
-            await interaction.response.defer()
-            msg = await interaction.followup.send(
+            await interaction.response.send_message(
                 content=panel._content(), view=panel, ephemeral=True
             )
+            msg = await interaction.original_response()
         else:
             msg = await ctx.channel.send(content=panel._content(), view=panel)
         panel.message = msg

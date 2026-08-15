@@ -15,6 +15,7 @@
 """
 
 import asyncio
+import logging
 
 import lolka as discord
 from lolka import ui
@@ -24,6 +25,7 @@ from ui_utils import esc, paginate
 
 _PAGE_SIZE = 20
 _OWNER_ONLY = "Эта кнопка только для автора поиска."
+_log = logging.getLogger(__name__)
 
 
 def add_track_dedupe(db, guild_id: int, name: str, track: dict) -> str:
@@ -252,8 +254,7 @@ async def open_picker(interaction, engine, guild_id: int, user_id: int, track: d
     picker = PlaylistPickerView(engine, guild_id, user_id, track, names)
     header = f"Куда добавить **{esc(track['title'])}**?"
     try:
-        await interaction.response.defer()
-        msg = await interaction.followup.send(content=header, view=picker, ephemeral=True)
-        picker.message = msg
-    except Exception:
-        pass
+        await interaction.response.send_message(content=header, view=picker, ephemeral=True)
+        picker.message = await interaction.original_response()
+    except Exception as exc:
+        _log.warning("open_picker: не удалось отправить пикер (guild=%s): %s", guild_id, exc)
