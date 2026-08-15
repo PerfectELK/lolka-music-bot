@@ -8,6 +8,7 @@ import pytest
 
 from engine import (
     MusicEngine,
+    _cycle_entries,
     _lazy_entry,
     _rewind_playlist,
     _rewind_queue,
@@ -104,6 +105,46 @@ def test_rewind_queue_does_not_mutate_inputs():
     _rewind_queue(hist, queue)
     assert [t["title"] for t in hist] == ["A", "B"]
     assert [t["title"] for t in queue] == ["C"]
+
+
+def test_cycle_entries_playlist_returns_copy():
+    items = [{"title": "A"}, {"title": "B"}, {"title": "C"}]
+    nav = {"name": "X", "items": items, "index": 2}
+    history = [{"title": "H"}]
+    q = _cycle_entries(nav, history)
+    assert [t["title"] for t in q] == ["A", "B", "C"]
+    assert q == items
+    # копия: мутация результата не меняет ни nav.items, ни history
+    q.pop()
+    assert [t["title"] for t in nav["items"]] == ["A", "B", "C"]
+    assert [t["title"] for t in history] == ["H"]
+
+
+def test_cycle_entries_no_nav_uses_history():
+    nav = None
+    history = [{"title": "H1"}, {"title": "H2"}]
+    q = _cycle_entries(nav, history)
+    assert [t["title"] for t in q] == ["H1", "H2"]
+    assert q is not history
+    # копия: мутация результата не трогает историю
+    q.clear()
+    assert [t["title"] for t in history] == ["H1", "H2"]
+
+
+def test_cycle_entries_empty_items_fallback_to_history():
+    # после !remove всех оставшихся треков nav.items пуст, но история непуста —
+    # фолбэк на историю, иначе бот молча отключится
+    nav = {"name": "X", "items": [], "index": 0}
+    history = [{"title": "H1"}, {"title": "H2"}]
+    q = _cycle_entries(nav, history)
+    assert [t["title"] for t in q] == ["H1", "H2"]
+
+
+def test_cycle_entries_both_empty_returns_none():
+    assert _cycle_entries(None, None) is None
+    assert _cycle_entries(None, []) is None
+    assert _cycle_entries({"name": "X", "items": [], "index": 0}, None) is None
+    assert _cycle_entries({"name": "X", "items": [], "index": 0}, []) is None
 
 
 def test_rewind_playlist_walk_back_and_toggle():

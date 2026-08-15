@@ -166,6 +166,14 @@ def _rewind_playlist(items: list, index: int, queue: list):
     return [*items[index - 2:index], *queue], index - 2
 
 
+def _cycle_entries(nav, history):
+    """Источник очереди для цикла: для плейлиста — весь плейлист
+    (pl_nav items), для простой очереди — история. None, если пусто."""
+    if nav is not None and nav.get("items"):
+        return list(nav["items"])
+    return list(history) if history else None
+
+
 class MusicEngine:
     def __init__(self, bot, db, ffmpeg_exe: Optional[str], perms: Optional[PermissionsDB] = None):
         self.bot = bot
@@ -898,14 +906,19 @@ class MusicEngine:
                             guild_id, entry["retries"], MAX_TRACK_RETRIES, entry["title"],
                         )
             if not q:
-                if self.loop_on.get(guild_id, True) and self.history.get(guild_id):
-                    q = list(self.history[guild_id])
-                    self.queues[guild_id] = q
+                if self.loop_on.get(guild_id, True):
                     nav = self.pl_nav.get(guild_id)
-                    if nav is not None:
-                        nav["items"] = list(q)
-                        nav["index"] = 0
-                    _log.info("[guild=%s] loop: очередь закончилась, повторяю %d треков", guild_id, len(q))
+                    q = _cycle_entries(nav, self.history.get(guild_id))
+                    if q:
+                        self.queues[guild_id] = q
+                        if nav is not None:
+                            nav["items"] = list(q)
+                            nav["index"] = 0
+                        _log.info("[guild=%s] loop: очередь закончилась, повторяю %d треков", guild_id, len(q))
+                    else:
+                        self.clear_guild(guild_id)
+                        await vc.disconnect()
+                        return
                 else:
                     self.clear_guild(guild_id)
                     await vc.disconnect()

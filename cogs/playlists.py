@@ -9,7 +9,7 @@ from engine import friendly_error
 from ui_utils import esc, fmt_duration, paginate
 from permissions_db import deny_text
 from resolver import fetch_info
-from upload_util import download_attachment, is_audio, local_url
+from upload_util import download_attachment, is_audio, local_path, local_url
 
 
 class PlaylistCog(commands.Cog):
@@ -82,7 +82,7 @@ class PlaylistCog(commands.Cog):
             await ctx.send(f"Плейлист **{esc(name)}** не найден — сначала `!pl create {name}`.")
             return
 
-        added, failed, queued = [], [], []
+        added, failed, queued, skipped = [], [], [], []
         for att in attachments:
             try:
                 path = await download_attachment(att)
@@ -90,13 +90,23 @@ class PlaylistCog(commands.Cog):
             except Exception as exc:
                 failed.append((att.filename, str(exc)))
                 continue
+            url = local_url(path)
+            if await asyncio.to_thread(
+                self.engine.db.has_track, ctx.guild.id, name, url
+            ):
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                skipped.append(path.stem)
+                continue
             ok = await asyncio.to_thread(
-                self.engine.db.add_track, ctx.guild.id, name, local_url(path), path.stem
+                self.engine.db.add_track, ctx.guild.id, name, url, path.stem
             )
             if ok:
                 added.append(path.stem)
                 if self.engine.on_playlist_track_added(
-                    ctx.guild.id, name, local_url(path), path.stem
+                    ctx.guild.id, name, url, path.stem
                 ):
                     queued.append(path.stem)
             else:
@@ -123,6 +133,11 @@ class PlaylistCog(commands.Cog):
                     failed.append((raw, friendly_error(result)))
                     continue
                 title, page_url, duration = result
+                if await asyncio.to_thread(
+                    self.engine.db.has_track, ctx.guild.id, name, page_url
+                ):
+                    skipped.append(title)
+                    continue
                 ok = await asyncio.to_thread(
                     self.engine.db.add_track, ctx.guild.id, name, page_url, title, duration
                 )
@@ -150,6 +165,8 @@ class PlaylistCog(commands.Cog):
             )
         if failed:
             lines.append("Не получилось: " + "; ".join(f"{esc(raw)} — {err}" for raw, err in failed))
+        if skipped:
+            lines.append("Уже в плейлисте: " + ", ".join(esc(t) for t in skipped))
         await ctx.send("\n".join(lines))
 
     @pl_cmd.command(name="play")
