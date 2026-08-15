@@ -35,6 +35,10 @@ FFMPEG_BEFORE_OPTIONS = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max
 TRACK_MIN_RETRY_SEC = 8.0
 MAX_TRACK_RETRIES = 3
 
+# Если до конца трека осталось меньше этого, при обрыве голоса трек не
+# возобновляется — очередь просто переходит к следующему.
+RESUME_GRACE_SEC = 5.0
+
 # Нормализация громкости (EBU R128, ReplayGain-подход): трек измеряется один
 # раз фильтром ebur128, при воспроизведении добавляется компенсирующий
 # фильтр -af volume=<gain>dB. Целевая громкость — стандарт YouTube.

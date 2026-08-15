@@ -51,6 +51,7 @@ from config import (
     LOCAL_URL_PREFIX,
     MAX_TRACK_RETRIES,
     PREFETCH_AHEAD,
+    RESUME_GRACE_SEC,
     SEARCH_COOLDOWN,
     SEARCH_RESULTS,
     SEARCH_TIMEOUT,
@@ -172,6 +173,37 @@ def _cycle_entries(nav, history):
     if nav is not None and nav.get("items"):
         return list(nav["items"])
     return list(history) if history else None
+
+
+def _requeue_interrupted(state, history, queue, nav, now=time.monotonic):
+    """Вернуть оборванный трек в начало очереди для возобновления.
+
+    Возвращает (entry, elapsed) или None. Мутирует history/queue/nav/entry.
+    Вызывается из _recover_voice синхронно (между вставкой и spawn(play_next)
+    нет await — окно для мутаций очереди отсутствует).
+    """
+    started = state.pop("track_started_at", None)
+    if started is None:
+        return None
+    elapsed = now() - started
+    if elapsed <= 0:
+        return None
+    hist = history or []
+    if not hist:
+        return None
+    entry = hist[-1]
+    if state.get("title") != entry.get("title"):
+        return None  # страховка: history[-1] не совпадает с играющим треком
+    duration = entry.get("duration")
+    if duration is not None and elapsed >= duration - RESUME_GRACE_SEC:
+        return None  # трек почти доиграл — возобновлять нечего
+    hist.pop()
+    queue.insert(0, entry)
+    if nav is not None:
+        nav["index"] = max(0, nav["index"] - 1)  # инвариант queue == items[index:]
+    entry["resume_seek"] = elapsed
+    state.pop("track_ended_quick", None)  # обрыв <TRACK_MIN_RETRY_SEC: ретрай заменён резюмом
+    return entry, elapsed
 
 
 class MusicEngine:
@@ -508,6 +540,28 @@ class MusicEngine:
         vc._connected = True
         return True
 
+    def _requeue_after_drop(self, guild_id: int) -> None:
+        """Вернуть оборванный трек в начало очереди после восстановления голоса.
+
+        Вызывается синхронно перед spawn(play_next) — между вставкой и стартом
+        play_next нет await, окно для мутаций очереди отсутствует.
+        """
+        state = self.play_state.get(guild_id)
+        if state is None:
+            return
+        resumed = _requeue_interrupted(
+            state,
+            self.history.get(guild_id),
+            self.queues.setdefault(guild_id, []),
+            self.pl_nav.get(guild_id),
+        )
+        if resumed is not None:
+            entry, seek = resumed
+            _log.info(
+                "[guild=%s] обрыв во время трека: возвращаю %s (seek %.1f с)",
+                guild_id, entry["title"], seek,
+            )
+
     async def _recover_voice(self, guild_id: int) -> None:
         """Восстановить оборвавшееся голосовое соединение и продолжить играть."""
         if guild_id in self._voice_recovering:
@@ -528,6 +582,7 @@ class MusicEngine:
                 self._drain_incoming(vc)
                 await self.report(guild_id, "Переподключился, продолжаю воспроизведение.")
                 self._schedule_leave_if_empty(guild_id, vc)
+                self._requeue_after_drop(guild_id)
                 if self.play_state.get(guild_id) is not None:
                     self.spawn(self.play_next(guild_id))
                 return
@@ -550,6 +605,7 @@ class MusicEngine:
             self._drain_incoming(new_vc)
             await self.report(guild_id, "Переподключился, продолжаю воспроизведение.")
             self._schedule_leave_if_empty(guild_id, new_vc)
+            self._requeue_after_drop(guild_id)
             if self.play_state.get(guild_id) is not None:
                 self.spawn(self.play_next(guild_id))
         finally:
@@ -876,11 +932,14 @@ class MusicEngine:
 
     async def play_next(self, guild_id: int) -> None:
         while True:
+            if guild_id in self._voice_recovering:
+                # Идёт восстановление голоса: после его завершения _recover_voice
+                # сам вызовет play_next. Не трогаем очередь на полусломанном
+                # соединении (гонка after-колбэка с переподключением).
+                return
             guild = self.bot.get_guild(guild_id)
             vc = guild.voice_client if guild is not None else None
             if vc is None or not vc.is_connected():
-                if guild_id in self._voice_recovering:
-                    return
                 _log.info("[guild=%s] play_next: нет голосового соединения, очищаю очередь", guild_id)
                 self.clear_guild(guild_id)
                 return
@@ -973,6 +1032,7 @@ class MusicEngine:
                 _log.info("[guild=%s] play_next: уже что-то играет, выхожу (гонка двух play_next)", guild_id)
                 return
             q.pop(0)
+            seek = entry.pop("resume_seek", 0.0) or 0.0
             nav = self.pl_nav.get(guild_id)
             if nav is not None:
                 nav["index"] += 1
@@ -993,6 +1053,12 @@ class MusicEngine:
                     if str(source_url).startswith(("http://", "https://"))
                     else None
                 )
+                if seek > 0:
+                    # Возобновление после обрыва голоса: fast seek (-ss до -i).
+                    seek_opt = f"-ss {seek:.1f}"
+                    before_options = (
+                        f"{seek_opt} {before_options}" if before_options else seek_opt
+                    )
                 # Нормализация громкости: измерение в потоке (блокирующий ffmpeg
                 # на ленивом пути ~1-3 с), компенсация — -af volume=<gain>dB.
                 gain = await asyncio.to_thread(

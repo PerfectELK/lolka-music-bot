@@ -10,11 +10,13 @@ from engine import (
     MusicEngine,
     _cycle_entries,
     _lazy_entry,
+    _requeue_interrupted,
     _rewind_playlist,
     _rewind_queue,
     friendly_error,
     rotate_tracks,
 )
+from config import RESUME_GRACE_SEC
 from ui_utils import esc, fmt_duration, paginate
 
 
@@ -167,6 +169,114 @@ def test_rewind_playlist_walk_back_and_toggle():
     assert _rewind_playlist(items, 0, items) is None
     # очередь == items[index:] (инвариант плейлиста)
     assert [t["title"] for t in q] == [t["title"] for t in items[index:]]
+
+
+def test_requeue_interrupted_basic():
+    state = {"title": "T1", "track_started_at": 100.0}
+    entry = {"title": "T1", "duration": 300.0}
+    hist = [{"title": "A"}, entry]
+    queue = [{"title": "B"}]
+    nav = {"name": "X", "items": [{"title": "A"}, entry, {"title": "B"}], "index": 2}
+    res = _requeue_interrupted(state, hist, queue, nav, now=lambda: 142.5)
+    assert res is not None
+    requeued, seek = res
+    assert requeued is entry  # объект тот же — история и очередь делят entry
+    assert seek == 42.5
+    assert queue[0] is entry
+    assert [t["title"] for t in queue] == ["T1", "B"]
+    assert [t["title"] for t in hist] == ["A"]
+    assert nav["index"] == 1
+    assert entry["resume_seek"] == 42.5
+    # инвариант плейлиста: очередь == items[index:]
+    assert [t["title"] for t in queue] == [t["title"] for t in nav["items"][nav["index"]:]]
+
+
+def test_requeue_interrupted_no_track_started():
+    # обрыв между треками: track_started_at нет (или уже снят) — ничего не делаем
+    state = {"title": "T1"}
+    hist = [{"title": "T1"}]
+    queue = [{"title": "B"}]
+    nav = {"name": "X", "items": [{"title": "T1"}, {"title": "B"}], "index": 1}
+    assert _requeue_interrupted(state, hist, queue, nav, now=lambda: 100.0) is None
+    assert [t["title"] for t in hist] == ["T1"]
+    assert [t["title"] for t in queue] == ["B"]
+    assert nav["index"] == 1
+
+
+def test_requeue_interrupted_empty_history():
+    state = {"title": "T1", "track_started_at": 100.0}
+    assert _requeue_interrupted(state, [], [], None, now=lambda: 150.0) is None
+
+
+def test_requeue_interrupted_near_end_no_resume():
+    # до конца осталось меньше RESUME_GRACE_SEC — возобновлять нечего
+    state = {"title": "T1", "track_started_at": 100.0}
+    entry = {"title": "T1", "duration": 50.0}
+    hist = [entry]
+    queue = []
+    assert _requeue_interrupted(state, hist, queue, None, now=lambda: 147.0) is None
+    assert hist == [entry]
+    assert queue == []
+    # ровно на границе тоже не возобновляем (elapsed >= duration - grace)
+    assert _requeue_interrupted({"title": "T1", "track_started_at": 100.0},
+                                hist, queue, None, now=lambda: 145.0) is None
+
+
+def test_requeue_interrupted_unknown_duration_resumes():
+    # duration неизвестен — резюм всегда (seek в конец безвреден)
+    state = {"title": "T1", "track_started_at": 100.0}
+    entry = {"title": "T1", "duration": None}
+    hist = [entry]
+    queue = []
+    res = _requeue_interrupted(state, hist, queue, None, now=lambda: 200.0)
+    assert res is not None
+    assert queue == [entry]
+    assert entry["resume_seek"] == 100.0
+
+
+def test_requeue_interrupted_title_mismatch_noop():
+    # страховка: history[-1] не совпадает с играющим треком
+    state = {"title": "Другой", "track_started_at": 100.0}
+    entry = {"title": "T1"}
+    hist = [entry]
+    queue = [{"title": "B"}]
+    assert _requeue_interrupted(state, hist, queue, None, now=lambda: 150.0) is None
+    assert hist == [entry]
+    assert queue == [{"title": "B"}]
+
+
+def test_requeue_interrupted_clears_track_ended_quick():
+    # обрыв < TRACK_MIN_RETRY_SEC: ретрай из play_next заменён резюмом —
+    # флаг снимается, двойного ре-кью не будет
+    state = {"title": "T1", "track_started_at": 100.0, "track_ended_quick": True}
+    entry = {"title": "T1", "duration": 300.0}
+    hist = [entry]
+    queue = []
+    assert _requeue_interrupted(state, hist, queue, None, now=lambda: 105.0) is not None
+    assert "track_ended_quick" not in state
+
+
+def test_requeue_interrupted_index_floor():
+    # индекс не уходит в минус (первый трек плейлиста): инвариант сохраняется
+    state = {"title": "T1", "track_started_at": 100.0}
+    entry = {"title": "T1", "duration": 300.0}
+    items = [entry]
+    hist = [entry]
+    queue = []
+    nav = {"name": "X", "items": items, "index": 0}
+    assert _requeue_interrupted(state, hist, queue, nav, now=lambda: 130.0) is not None
+    assert nav["index"] == 0
+    assert [t["title"] for t in queue] == [t["title"] for t in items[nav["index"]:]]
+
+
+def test_requeue_interrupted_stale_elapsed_noop():
+    # elapsed <= 0 (часы назад?) — не мутируем ничего
+    state = {"title": "T1", "track_started_at": 100.0}
+    hist = [{"title": "T1"}]
+    queue = [{"title": "B"}]
+    assert _requeue_interrupted(state, hist, queue, None, now=lambda: 50.0) is None
+    assert [t["title"] for t in hist] == ["T1"]
+    assert [t["title"] for t in queue] == ["B"]
 
 
 def test_esc():
